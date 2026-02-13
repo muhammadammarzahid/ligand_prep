@@ -1,0 +1,10 @@
+CC[C@@H](O)C[C@H](C)[C@H](O)[C@@](C)(/C=C/C(=O)N[C@H](CO)[C@@H](C)CC)OC NPA000001
+C=C(C)[C@@H]1C[C@@]2(C)C(=CC1=O)CC[C@@H](OC(=O)[C@@H](C)[C@@H](O)/C=C/C=C/C(=O)O)[C@@H]2C NPA000002
+COC1C(C(OC2OC(C(=O)O)=CC(O)C2O)C(N)=O)OC(n2ccc(=O)[nH]c2=O)C1OC(N)=O NPA000003
+O=Nc1[nH]c(O)c(-c2ccccc2)c1-c1ccc(O)c([N+](=O)[O-])c1 NPA000004
+C[C@@]1(CO)CCC[C@]2(C)[C@H]3C[C@@]45OC4[C@H](O)[C@]4(CO)OC4[C@]5(O)CC3=CC[C@@H]12 NPA000005
+CCCC1(O)C(O[C@H]2CCC(O[C@H]3CC[C@@](O)(C(C)=O)[C@H](C)O3)[C@@H](C)O2)C(O)C(O[C@H]2C[C@@H](O)[C@@H](O)[C@H](C)O2)C2Cc3cc4c(OC)c(OC)c(C5=C(OC)C(=O)c6c(O)c7c(c(O)c6C5=O)C(=O)C5(O)C6C7OC5(CCC)C(O[C@H]5CCC(O)[C@@H](C)O5)C(O)C6O[C@H]5C[C@@H](O)[C@@H](O)[C@H](C)O5)c(O)c4c(O)c3C(=O)C21O NPA000006
+COc1cccc2oc3cc4c(c(O)c3c(=O)c12)[C@@H]1C[C@@H](O)C[C@](C)(O4)O1 NPA000007
+CCC(=O)[C@H](C)[C@@H](O)[C@@H](C)C(=O)CC/C(C)=C\CC(O)/C(C)=C/c1csc(C)n1 NPA000008
+COc1cc(C(=O)O)cc(=O)c(OC)c1O NPA000009
+Cc1cc(O)c(CO)c2c1C(=O)Oc1c(C)c(O)c(O)c(C)c1O2 NPA000010
