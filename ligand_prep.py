@@ -11,49 +11,38 @@ from molvs import Standardizer
 from dimorphite_dl import protonate_smiles
 
 # ---------------------------------------------------------
-# Helper Functions (Must be top-level for multiprocessing)
+# Helper Functions
 # ---------------------------------------------------------
 
 def check_lipinski(mol):
-    """
-    Returns True if molecule passes Lipinski's Rule of 5.
-    Rules: MW <= 500, LogP <= 5, HBD <= 5, HBA <= 10
-    """
     if mol is None: return False
-    
     try:
-        # Calculate descriptors
         mw = Descriptors.MolWt(mol)
         logp = Descriptors.MolLogP(mol)
         hbd = Lipinski.NumHDonors(mol)
         hba = Lipinski.NumHAcceptors(mol)
-
         if mw <= 500 and logp <= 5 and hbd <= 5 and hba <= 10:
             return True
     except:
         return False
-        
     return False
 
 def process_single_molecule(task_data):
     """
-    Worker function to process a single molecule based on config.
-    Args:
-        task_data: Tuple of (mol, name, config_dict)
-    Returns:
-        List of prepared RDKit Mol objects
+    Worker function.
+    Collects ALL successful variants first, then names them.
+    This ensures we don't add '_v1' if there is only one result.
     """
-    mol, name, config = task_data
+    mol, header_name, props, config = task_data
     
     # --- Step 1: Lipinski Filter ---
     if config.get('do_filter', True):
         if not check_lipinski(mol):
             return []
 
-    # If "Filter Only" mode is active, return the original molecule immediately
+    # If "Filter Only", return immediately
     if config.get('stop_after_filter', False):
-        mol.SetProp("_Name", name)
-        return [mol]
+        return [(mol, header_name, props)]
 
     # --- Step 2: Standardization ---
     current_mol = mol
@@ -61,76 +50,85 @@ def process_single_molecule(task_data):
         try:
             s = Standardizer()
             mol_std = s.standardize(mol)
-            # charge_parent handles neutralization and salt removal
             current_mol = s.charge_parent(mol_std, skip_standardize=True)
         except:
-            # If standardization fails, drop molecule
             return []
 
-    # --- Step 3: Protonation (pH 7.0 - 7.4) ---
+    # --- Step 3: Protonation ---
     protonated_mols = []
     if config.get('do_protonate', True):
         try:
-            # isomericSmiles=True is CRITICAL to preserve the stereochemistry 
-            # we read from the input 3D structure.
             smi = Chem.MolToSmiles(current_mol, isomericSmiles=True)
-            
-            # Dimorphite-DL protonation
             protonated_smiles_list = protonate_smiles(smi, ph_min=7.0, ph_max=7.4)
             protonated_mols = [Chem.MolFromSmiles(s) for s in protonated_smiles_list]
         except:
             return []
     else:
-        # If skipping protonation, just use the standardized molecule
         protonated_mols = [current_mol]
 
-    # --- Step 4: Stereoisomers & 3D Conformation ---
-    prepared_mols = []
+    # --- Step 4: Collect 2D Candidates (Stereo) ---
+    # We flatten the list of potential candidates here
+    candidates_2d = []
     
     for p_mol in protonated_mols:
         if p_mol is None: continue
-
-        # Enumerate Stereoisomers?
-        # If the input was 3D and we read chirality, this step will respect it 
-        # (only enumerating undefined centers).
-        isomers = []
+        
         if config.get('do_stereo', True):
             opts = StereoEnumerationOptions(tryEmbedding=True, unique=True, maxIsomers=4)
             try:
                 isomers = list(EnumerateStereoisomers(p_mol, options=opts))
+                candidates_2d.extend(isomers)
             except:
-                continue
+                candidates_2d.append(p_mol)
         else:
-            isomers = [p_mol]
+            candidates_2d.append(p_mol)
+
+    # --- Step 5: 3D Generation & Filtering ---
+    successful_mols = []
+    
+    for candidate in candidates_2d:
+        target_mol = candidate
         
-        for i, iso in enumerate(isomers):
-            # Naming: Append suffix if we generated variants
-            variant_suffix = f"_v{i+1}" if len(isomers) > 1 or len(protonated_mols) > 1 else ""
-            iso.SetProp("_Name", f"{name}{variant_suffix}")
-
-            # 3D Embedding
-            if config.get('do_3d', True):
-                iso_h = Chem.AddHs(iso)
-                
-                # Use ETKDGv3 for better ring conformations
-                params = AllChem.ETKDGv3()
-                params.useRandomCoords = True
-                
-                res = AllChem.EmbedMolecule(iso_h, params)
-                
-                if res == 0:
-                    try:
-                        # Energy Minimize using MMFF94
-                        AllChem.MMFFOptimizeMolecule(iso_h)
-                        prepared_mols.append(iso_h)
-                    except:
-                        pass # Minimization failed, skip this isomer
+        if config.get('do_3d', True):
+            # Try 3D embedding
+            iso_h = Chem.AddHs(candidate)
+            params = AllChem.ETKDGv3()
+            params.useRandomCoords = True
+            
+            res = AllChem.EmbedMolecule(iso_h, params)
+            if res == 0:
+                try:
+                    AllChem.MMFFOptimizeMolecule(iso_h)
+                    target_mol = iso_h
+                    successful_mols.append(target_mol)
+                except:
+                    # If optimization fails, keeps unoptimized 3D
+                    target_mol = iso_h
+                    successful_mols.append(target_mol)
             else:
-                # Keep 2D (Calculate 2D coords just in case)
-                AllChem.Compute2DCoords(iso)
-                prepared_mols.append(iso)
+                # Embedding failed, drop this candidate
+                continue 
+        else:
+            # 2D Mode
+            AllChem.Compute2DCoords(candidate)
+            successful_mols.append(candidate)
 
-    return prepared_mols
+    # --- Step 6: Final Naming Logic ---
+    # Only append suffix if we actually produced multiple valid molecules
+    results_to_return = []
+    total_count = len(successful_mols)
+    
+    for i, final_mol in enumerate(successful_mols):
+        if total_count > 1:
+            # We have variants, so use suffixes (v1, v2...)
+            final_name = f"{header_name}_v{i+1}"
+        else:
+            # Singleton: Keep original name exactly
+            final_name = header_name
+            
+        results_to_return.append((final_mol, final_name, props))
+
+    return results_to_return
 
 # ---------------------------------------------------------
 # Main Execution Flow
@@ -139,124 +137,93 @@ def process_single_molecule(task_data):
 def load_molecules(input_file):
     mols = []
     names = []
+    all_props = [] 
+    
     print(f"Loading molecules from {input_file}...")
     
     if input_file.endswith('.sdf'):
-        # Iterate over the file
         suppl = Chem.SDMolSupplier(input_file, removeHs=False)
         for i, m in enumerate(suppl):
             if m:
-                # --- CRITICAL: READ CHIRALITY FROM 3D ---
+                # 1. Capture Properties
+                props = {}
                 try:
-                    if m.GetNumConformers() > 0:
-                        Chem.AssignStereochemistryFrom3D(m)
+                    for key in m.GetPropNames():
+                        props[key] = m.GetProp(key)
                 except:
-                    pass # Fallback to graph topology if 3D assignment fails
+                    pass
+
+                # 2. Capture Name
+                n = ""
+                if m.HasProp("_Name"):
+                    n = m.GetProp("_Name").strip()
                 
-                n = m.GetProp("_Name") if m.HasProp("_Name") else f"Ligand_{i}"
+                if not n:
+                    check_list = ["Name", "ID", "compound_id", "Title"]
+                    for tag in check_list:
+                        for key in props.keys():
+                            if tag.lower() == key.lower():
+                                n = props[key].strip()
+                                break
+                        if n: break
+                
+                if not n:
+                    n = f"Ligand_{i+1}"
+                
                 mols.append(m)
                 names.append(n)
+                all_props.append(props)
                 
     elif input_file.endswith('.smi') or input_file.endswith('.smiles'):
         with open(input_file, 'r') as f:
             for i, line in enumerate(f):
                 if line.strip():
-                    parts = line.split()
+                    parts = line.strip().split(None, 1)
                     smiles = parts[0]
-                    # Read name from second column if available
-                    name_in_file = parts[1] if len(parts) > 1 else f"Ligand_{i}"
+                    name_in_file = parts[1] if len(parts) > 1 else f"Ligand_{i+1}"
                     
                     m = Chem.MolFromSmiles(smiles)
                     if m:
                         mols.append(m)
                         names.append(name_in_file)
-                        
-    return list(zip(mols, names))
+                        all_props.append({"Original_SMILES": smiles})
+    
+    # Visual update: Just return the list, main() handles printing counts
+    return list(zip(mols, names, all_props))
 
-def remove_duplicates(mol_list):
-    """
-    Deduplicates molecules based on Canonical Isomeric SMILES.
-    Using Isomeric SMILES ensures enantiomers (R vs S) are treated as different.
-    """
+def remove_duplicates(mol_data):
     seen = set()
     unique_inputs = []
     
     print("Deduplicating...")
-    for mol, name in mol_list:
+    for mol, name, props in mol_data:
         try:
-            # canonical=True, isomericSmiles=True preserves chirality
             smi = Chem.MolToSmiles(mol, isomericSmiles=True, canonical=True)
             if smi not in seen:
                 seen.add(smi)
-                unique_inputs.append((mol, name))
+                unique_inputs.append((mol, name, props))
         except:
             continue
-            
     return unique_inputs
 
-def save_mols(mol_list, output_file):
-    if not mol_list:
-        print("No molecules to save.")
-        return
-
-    w = Chem.SDWriter(output_file)
-    for m in mol_list:
-        if m: w.write(m)
-    w.close()
-    print(f"Saved {len(mol_list)} molecules to: {output_file}")
-
-def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="Molecule Preparation Pipeline: Filter, Standardize, Protonate, 3D Generate."
-    )
-    
-    # Required Arguments
-    parser.add_argument("input", help="Input file path (.sdf or .smi)")
-    parser.add_argument("output", help="Output file path (.sdf)")
-
-    # Modes
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--dedup-only", action="store_true", 
-                       help="Only load, deduplicate, and save molecules.")
-    group.add_argument("--filter-only", action="store_true", 
-                       help="Load, deduplicate, apply Lipinski filter, and save (no 3D/protonation).")
-
-    # Step Toggles (Flags to DISABLE specific steps)
-    parser.add_argument("--skip-filter", action="store_true", help="Skip Lipinski rule check.")
-    parser.add_argument("--skip-standardize", action="store_true", help="Skip MolVS standardization.")
-    parser.add_argument("--skip-protonate", action="store_true", help="Skip pH 7.4 protonation.")
-    parser.add_argument("--skip-stereo", action="store_true", help="Skip stereoisomer enumeration.")
-    parser.add_argument("--skip-3d", action="store_true", help="Skip 3D embedding (save as 2D).")
-
-    return parser.parse_args()
-
 def main():
-    args = parse_arguments()
+    args = parse_arguments() 
     
-    # --- 1. Load Data ---
+    # 1. Load (Visual Update: Print Initial Count)
     raw_data = load_molecules(args.input)
-    if not raw_data:
-        print("Error: No molecules loaded.")
-        sys.exit(1)
+    if not raw_data: sys.exit(1)
     
     count_initial = len(raw_data)
     print(f"-> Initial molecule count: {count_initial}")
 
-    # --- 2. Deduplicate ---
+    # 2. Dedup (Visual Update: Print Deduplication stats)
     unique_inputs = remove_duplicates(raw_data)
-    
     count_dedup = len(unique_inputs)
+    
     print(f"-> Count after deduplication: {count_dedup}")
     print(f"   (Removed {count_initial - count_dedup} duplicates)")
-
-    # --- Check for "Dedup Only" Mode ---
-    if args.dedup_only:
-        print("Mode: Deduplicate Only. Saving...")
-        save_mols([m for m, n in unique_inputs], args.output)
-        return
-
-    # --- 3. Configure Processing ---
-    # Build a config dictionary to pass to workers
+    
+    # 3. Config
     config = {
         'do_filter': not args.skip_filter,
         'do_standardize': not args.skip_standardize,
@@ -266,11 +233,9 @@ def main():
         'stop_after_filter': args.filter_only
     }
 
-    # Override config for "Filter Only" mode
+    # --- VISUAL ELEMENT MERGE: Print Configuration Block ---
     if args.filter_only:
         print("Mode: Filter Only (Lipinski). Skipping 3D/Protonation.")
-        config['do_filter'] = True
-        config['stop_after_filter'] = True
     else:
         print("Mode: Full Pipeline Active")
         print(f"   [x] Filter (Lipinski):  {'ON' if config['do_filter'] else 'OFF'}")
@@ -278,39 +243,57 @@ def main():
         print(f"   [x] Protonate (pH 7.4): {'ON' if config['do_protonate'] else 'OFF'}")
         print(f"   [x] Stereo Enumeration: {'ON' if config['do_stereo'] else 'OFF'}")
         print(f"   [x] 3D Generation:      {'ON' if config['do_3d'] else 'OFF'}")
+    # -------------------------------------------------------
 
-    # --- 4. Prepare Tasks for Multiprocessing ---
-    # We pack the config dictionary into the tuple for every molecule
-    tasks = [(mol, name, config) for mol, name in unique_inputs]
-    
-    # Leave one CPU free to keep system responsive
+    # 4. Processing
+    tasks = [(mol, name, props, config) for mol, name, props in unique_inputs]
     num_workers = max(1, cpu_count() - 1)
-    print(f"\nStarting processing on {num_workers} cores...")
-
-    all_results = []
     
-    # Run Pool
+    print(f"Processing on {num_workers} cores...")
+    
+    w = Chem.SDWriter(args.output)
+    count_saved = 0
+
     with Pool(processes=num_workers) as pool:
-        # imap_unordered is faster as it yields results as soon as they finish
         results_iterator = pool.imap_unordered(process_single_molecule, tasks)
         
-        # tqdm wraps the iterator to show the progress bar
-        for result_list in tqdm(results_iterator, total=len(tasks), unit="mol", desc="Processing"):
-            if result_list:
-                all_results.extend(result_list)
+        for result_batch in tqdm(results_iterator, total=len(tasks), unit="mol"):
+            if not result_batch: continue
+            
+            for (mol_obj, final_name, original_props) in result_batch:
+                if mol_obj:
+                    # 1. Set Header
+                    mol_obj.SetProp("_Name", final_name)
+                    
+                    # 2. Set Data Tags
+                    for k, v in original_props.items():
+                        if k and str(k).strip(): 
+                             mol_obj.SetProp(str(k), str(v))
+                    
+                    # 3. Ensure Name/ID exists
+                    mol_obj.SetProp("Name", final_name)
+                    mol_obj.SetProp("ID", final_name)
 
-    # --- 5. Final Report & Save ---
-    count_final = len(all_results)
-    print("\nProcessing Complete.")
-    print("-" * 30)
-    print(f"Initial raw inputs:      {count_initial}")
-    print(f"Unique inputs:           {count_dedup}")
-    print(f"Final output molecules:  {count_final}")
-    print("-" * 30)
+                    w.write(mol_obj)
+                    count_saved += 1
 
-    save_mols(all_results, args.output)
+    w.close()
+    print(f"\nSuccess. Saved {count_saved} molecules to {args.output}")
+
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input", help="Input file path (.sdf or .smi)")
+    parser.add_argument("output", help="Output file path (.sdf)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--dedup-only", action="store_true")
+    group.add_argument("--filter-only", action="store_true")
+    parser.add_argument("--skip-filter", action="store_true")
+    parser.add_argument("--skip-standardize", action="store_true")
+    parser.add_argument("--skip-protonate", action="store_true")
+    parser.add_argument("--skip-stereo", action="store_true")
+    parser.add_argument("--skip-3d", action="store_true")
+    return parser.parse_args()
 
 if __name__ == "__main__":
-    # Essential for Windows multiprocessing
     multiprocessing.freeze_support()
     main()
