@@ -247,7 +247,11 @@ def main():
 
     # 4. Processing
     tasks = [(mol, name, props, config) for mol, name, props in unique_inputs]
-    num_workers = max(1, cpu_count() - 1)
+    
+    if args.use_cores is not None:
+        num_workers = max(1, min(args.use_cores, cpu_count()))
+    else:
+        num_workers = max(1, cpu_count() - 1)
     
     print(f"Processing on {num_workers} cores...")
     
@@ -284,6 +288,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("input", help="Input file path (.sdf or .smi)")
     parser.add_argument("output", help="Output file path (.sdf)")
+    parser.add_argument("--use_cores", type=int, help="Limit the number of CPU cores used")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--dedup-only", action="store_true")
     group.add_argument("--filter-only", action="store_true")

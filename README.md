@@ -20,9 +20,24 @@ It automates the cleaning of raw molecule data, filters by drug-likeness, adjust
 
 ## 🛠️ Installation
 
-Because this script relies on **RDKit**, it is highly recommended to use **Conda** or **Mamba** for installation.
+Because this script relies on **RDKit**, it is highly recommended to use **Pixi**, **Conda**, or **Mamba** for installation.
 
-### 1. Create a Conda Environment
+### Option A: Create a Pixi Environment (Recommended)
+
+Pixi is a fast package manager. Run the following inside the project directory:
+
+```bash
+pixi init
+pixi add python tqdm rdkit
+pixi add --pypi molvs dimorphite_dl
+```
+
+Run the script inside the environment:
+```bash
+pixi run python ligand_prep.py inputs.smi output.sdf
+```
+
+### Option B: Create a Conda Environment
 
 Create a clean environment with Python and RDKit installed:
 
@@ -33,7 +48,7 @@ conda install -c conda-forge rdkit
 
 ```
 
-### 2. Install Python Dependencies
+#### Install Python Dependencies
 
 Install the remaining required packages via pip:
 
@@ -68,6 +83,7 @@ You can customize the pipeline using flags.
 
 | Flag                   | Description                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------ |
+| `--use_cores`        | Limits the number of CPU cores used (e.g., `--use_cores=4`). Default: all available minus 1. |
 | `--dedup-only`       | Loads, removes duplicates, and saves immediately. No processing.               |
 | `--filter-only`      | Loads, removes duplicates, checks Lipinski rules, and saves. No 3D generation. |
 | `--skip-filter`      | Disables the Lipinski Rule of 5 filter (keeps all molecules).                  |
@@ -132,5 +148,5 @@ python ligand_prep.py inputs.sdf output.sdf --skip-protonate
 ## ⚠️ Notes
 
 * **Windows Users:** The script includes `multiprocessing.freeze_support()`, so it works natively on Windows. However, ensure you run it inside a standard terminal (CMD/PowerShell/Anaconda Prompt).
-* **Performance:** The script reserves 1 CPU core for the OS and uses the rest for calculation. 3D embedding is the most time-consuming step.
+* **Performance:** By default, the script reserves 1 CPU core for the OS and uses the rest for calculation. You can limit CPU usage with the `--use_cores` flag. 3D embedding is the most time-consuming step.
 * **Failures:** If a molecule fails embedding or sanitization, it is silently dropped to prevent the pipeline from crashing. The final count will reflect this.
